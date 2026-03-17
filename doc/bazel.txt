@@ -1,0 +1,203 @@
+*bazel.txt*  Bazel integration for Neovim                          *bazel.nvim*
+
+==============================================================================
+CONTENTS                                                       *bazel-contents*
+
+  1. Introduction ........................................ |bazel-intro|
+  2. Setup ............................................... |bazel-setup|
+  3. Commands ............................................ |bazel-commands|
+  4. Key mappings ........................................ |bazel-keymaps|
+  5. Configuration ....................................... |bazel-config|
+  6. Target picker ....................................... |bazel-picker|
+  7. Output buffer ....................................... |bazel-output|
+  8. Error parsing / quickfix ............................ |bazel-quickfix|
+
+==============================================================================
+1. INTRODUCTION                                                  *bazel-intro*
+
+bazel.nvim integrates the Bazel build system into Neovim. Features:
+
+  • Async build / test / run / clean via |jobstart| — non-blocking
+  • Streamed output to a persistent scratch buffer
+  • Error and warning parsing into the |quickfix| list
+  • Interactive target picker (telescope or |vim.ui.select| fallback)
+  • Jump to nearest BUILD / BUILD.bazel file
+  • `bazel query` wrapper
+  • `bazel info` floating window
+  • Per-workspace target cache with configurable TTL
+  • Last-used target persisted across sessions
+
+==============================================================================
+2. SETUP                                                         *bazel-setup*
+
+Minimal (uses all defaults): >lua
+  require("bazel").setup()
+<
+
+Typical configuration: >lua
+  require("bazel").setup({
+    bazel_cmd     = "bazel",
+    build_flags   = { "--config=ci" },
+    test_flags    = { "--test_output=errors" },
+    auto_open_qf  = true,
+    output_buf_pos = "botright",
+    keymaps = {
+      build = "<leader>bb",
+      test  = "<leader>bt",
+    },
+  })
+<
+
+If you never call `setup()`, it is automatically called with defaults on
+|VimEnter|.
+
+==============================================================================
+3. COMMANDS                                                   *bazel-commands*
+
+:BazelBuild [target] [flags...]                              *:BazelBuild*
+  Build the given target. Without a target, opens the interactive picker.
+  Extra arguments are appended after any configured `build_flags`.
+
+:BazelTest [target] [flags...]                               *:BazelTest*
+  Test the given target. Without a target, opens the picker.
+
+:BazelRun [target] [flags...]                                *:BazelRun*
+  Run the given target. Without a target, opens the picker.
+
+:BazelClean [--expunge]                                      *:BazelClean*
+  Run `bazel clean`. Pass `--expunge` to wipe the entire output base.
+  On success, the target cache for the workspace is invalidated.
+
+:BazelQuery <expr>                                           *:BazelQuery*
+  Evaluate a bazel query expression and stream results to the output buffer.
+  Example: >
+    :BazelQuery deps(//my/pkg:lib)
+<
+
+:BazelInfo [key]                                             *:BazelInfo*
+  Show `bazel info` output in a floating window. With a key argument only
+  that value is displayed, e.g. `:BazelInfo output-base`.
+
+:BazelJumpToBuild                                          *:BazelJumpToBuild*
+  Open the nearest `BUILD` or `BUILD.bazel` file between the current file's
+  directory and the workspace root.
+
+:BazelPick [build|test|run]                                  *:BazelPick*
+  Open the interactive target picker.
+  • Without an argument: stores the chosen target as the default for the
+    next invocation of BazelBuild / BazelTest / BazelRun.
+  • With `build`, `test`, or `run`: executes that sub-command immediately
+    after the user picks a target.
+
+:BazelOutput                                                 *:BazelOutput*
+  Open (or focus) the output buffer without starting a job. Useful for
+  reviewing the output of the last build.
+
+==============================================================================
+4. KEY MAPPINGS                                               *bazel-keymaps*
+
+Default normal-mode mappings:
+
+  <leader>bb  →  :BazelBuild
+  <leader>bt  →  :BazelTest
+  <leader>br  →  :BazelRun
+  <leader>bc  →  :BazelClean
+  <leader>bp  →  :BazelPick
+  <leader>bj  →  :BazelJumpToBuild
+  <leader>bi  →  :BazelInfo
+  <leader>bo  →  :BazelOutput
+
+Disable a mapping by setting its key to `false`: >lua
+  require("bazel").setup({
+    keymaps = { clean = false, info = false },
+  })
+<
+
+==============================================================================
+5. CONFIGURATION                                              *bazel-config*
+
+All options and their defaults:
+
+  bazel_cmd      (string)     Bazel executable.  Default: "bazel"
+
+  build_flags    (string[])   Extra flags appended to every BazelBuild.
+                              Default: {}
+
+  test_flags     (string[])   Extra flags appended to every BazelTest.
+                              Default: {}
+
+  run_flags      (string[])   Extra flags appended to every BazelRun.
+                              Default: {}
+
+  last_target    (string)     Override the default target.  Normally
+                              restored from disk on startup.
+                              Default: nil
+
+  auto_open_qf   (boolean)    Open quickfix after a failed invocation.
+                              Default: true
+
+  auto_close_qf  (boolean)    Close quickfix when exit is 0 and no items.
+                              Default: false
+
+  output_buf_pos (string)     Where to open the output split:
+                                "botright" | "topleft" | "float"
+                              Default: "botright"
+
+  float_opts     (table)      Merged into `nvim_open_win` config when
+                              `output_buf_pos` is "float".
+                              Default: {}
+
+  cache_ttl      (number)     Seconds before the target list is re-queried.
+                              Default: 300
+
+  keymaps        (table)      Mapping overrides. Set a key to `false` to
+                              disable that mapping. See |bazel-keymaps|.
+
+==============================================================================
+6. TARGET PICKER                                              *bazel-picker*
+
+bazel.nvim fetches targets by running `bazel query //...` asynchronously
+inside the workspace root. Results are cached per workspace for `cache_ttl`
+seconds. The cache is invalidated automatically after a successful build or
+clean so newly added targets surface without a manual refresh.
+
+When telescope.nvim is installed the picker uses telescope with fuzzy
+matching. Without telescope, `vim.ui.select` is used — any UI plugin that
+overrides `vim.ui.select` (e.g. dressing.nvim) will work transparently.
+
+The last selected target is starred in the picker list and persisted to: >
+  stdpath("data") .. "/bazel_nvim_last_target.txt"
+<
+It is restored across Neovim restarts.
+
+==============================================================================
+7. OUTPUT BUFFER                                              *bazel-output*
+
+All commands stream output to a single reusable scratch buffer named
+`[Bazel Output]`. It has `buftype=nofile`, is not listed in the buffer list,
+and is wiped at the start of each new invocation. The window position is
+controlled by the `output_buf_pos` config option.
+
+Within the `:BazelInfo` float, press `q` or `<Esc>` to close it.
+
+==============================================================================
+8. ERROR PARSING / QUICKFIX                                  *bazel-quickfix*
+
+After each invocation bazel.nvim scans the output for diagnostic lines and
+populates the |quickfix| list. Recognised formats:
+
+  • Starlark / BUILD errors (with and without col)
+  • C/C++ errors and warnings
+  • Java errors and warnings
+  • Python errors
+  • Rust errors and warnings (including error codes)
+  • Go errors
+
+Paths are made absolute relative to the workspace root before insertion so
+`:cfirst` / `:cnext` open the correct files regardless of cwd.
+
+With `auto_open_qf = true` (default) the quickfix window opens automatically
+when errors are found and `:cfirst` jumps to the first error.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
