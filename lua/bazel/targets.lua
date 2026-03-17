@@ -7,8 +7,16 @@ local util = require("bazel.util")
 -- { [workspace_root] = { targets = string[], ts = number, dirty = bool } }
 local _cache = {}
 
--- Path for persisting the last used target across sessions.
-local _persist_path = vim.fn.stdpath("data") .. "/bazel_nvim_last_target.txt"
+local _data_dir     = vim.fn.stdpath("data")
+local _persist_path = _data_dir .. "/bazel_nvim_last_target.txt"
+local _history_path = _data_dir .. "/bazel_nvim_history.txt"
+local _plat_history_path = _data_dir .. "/bazel_nvim_platform_history.txt"
+
+local HISTORY_MAX = 20
+
+-- In-memory history (most recent first)
+local _history      = nil  -- lazy loaded
+local _plat_history = nil
 
 --- Return cached targets for `root` if still valid, else nil.
 ---@param root string
@@ -98,6 +106,70 @@ function M.fetch(root, callback)
       end
     end,
   })
+end
+
+--- Load a history list from a file (one entry per line).
+---@param path string
+---@return string[]
+local function load_list(path)
+  local f = io.open(path, "r")
+  if not f then return {} end
+  local items = {}
+  for line in f:lines() do
+    local t = util.trim(line)
+    if t ~= "" then table.insert(items, t) end
+  end
+  f:close()
+  return items
+end
+
+--- Save a list to a file (one entry per line).
+---@param path string
+---@param items string[]
+local function save_list(path, items)
+  local f = io.open(path, "w")
+  if not f then return end
+  for _, item in ipairs(items) do f:write(item .. "\n") end
+  f:close()
+end
+
+--- Push a target to the front of history (deduplicates, caps at HISTORY_MAX).
+---@param target string
+function M.push_history(target)
+  if not _history then _history = load_list(_history_path) end
+  -- Remove existing occurrence
+  for i, t in ipairs(_history) do
+    if t == target then table.remove(_history, i); break end
+  end
+  table.insert(_history, 1, target)
+  if #_history > HISTORY_MAX then _history[HISTORY_MAX + 1] = nil end
+  save_list(_history_path, _history)
+end
+
+--- Return the in-memory target history (most recent first).
+---@return string[]
+function M.get_history()
+  if not _history then _history = load_list(_history_path) end
+  return _history
+end
+
+--- Push a platform to platform history.
+---@param platform string
+function M.push_platform_history(platform)
+  if not _plat_history then _plat_history = load_list(_plat_history_path) end
+  for i, p in ipairs(_plat_history) do
+    if p == platform then table.remove(_plat_history, i); break end
+  end
+  table.insert(_plat_history, 1, platform)
+  if #_plat_history > HISTORY_MAX then _plat_history[HISTORY_MAX + 1] = nil end
+  save_list(_plat_history_path, _plat_history)
+end
+
+--- Return the platform history (most recent first).
+---@return string[]
+function M.get_platform_history()
+  if not _plat_history then _plat_history = load_list(_plat_history_path) end
+  return _plat_history
 end
 
 --- Save last_target to disk.

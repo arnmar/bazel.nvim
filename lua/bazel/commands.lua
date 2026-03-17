@@ -7,6 +7,7 @@ local runner    = require("bazel.runner")
 local targets   = require("bazel.targets")
 local picker    = require("bazel.picker")
 local workspace = require("bazel.workspace")
+local state     = require("bazel.state")
 
 local function cfg() return require("bazel").config end
 
@@ -26,6 +27,7 @@ local function require_workspace()
 end
 
 --- Build and run a bazel sub-command for a concrete target.
+--- State flags (config, platform) are injected automatically.
 ---@param subcmd string
 ---@param target string
 ---@param extra_flags string[]
@@ -36,54 +38,86 @@ local function run_target(subcmd, target, extra_flags)
 
   c.last_target = target
   targets.save_last_target(target)
+  targets.push_history(target)
 
+  -- State flags come first so .bazelrc can still be overridden by extra_flags
   local cmd_parts = { c.bazel_cmd, subcmd }
+  vim.list_extend(cmd_parts, state.get_flags())
   for _, f in ipairs(extra_flags or {}) do table.insert(cmd_parts, f) end
   table.insert(cmd_parts, target)
 
+  local desc = state.describe()
+  local title = "Bazel " .. subcmd .. " " .. target
+  if desc ~= "default" then title = title .. "  [" .. desc .. "]" end
+
   runner.run(cmd_parts, {
-    title     = "Bazel " .. subcmd .. " " .. target,
+    title     = title,
     workspace = root,
   })
 end
 
---- Open the picker, then call `action(target)`.
+--- Open the picker over `items`, with history entries bubbled to the top.
+---@param items string[]
+---@param prompt string
+---@param callback fun(choice: string)
+local function pick_with_history(items, prompt, callback)
+  local history = targets.get_history()
+  local seen = {}
+  local sorted = {}
+
+  -- History first (most recent first), deduplicated
+  for _, t in ipairs(history) do
+    if not seen[t] then
+      seen[t] = true
+      table.insert(sorted, t)
+    end
+  end
+  -- Then remaining items
+  for _, t in ipairs(items) do
+    if not seen[t] then
+      seen[t] = true
+      table.insert(sorted, t)
+    end
+  end
+
+  local history_set = {}
+  for _, t in ipairs(history) do history_set[t] = true end
+
+  picker.select(sorted, {
+    prompt = prompt,
+    format = function(t)
+      return history_set[t] and ("» " .. t) or t
+    end,
+  }, callback)
+end
+
+--- Fetch targets and open picker, then call `action(target)`.
 ---@param prompt string
 ---@param action fun(target: string)
 local function pick_then(prompt, action)
   local root = require_workspace()
   if not root then return end
 
-  util.notify("Fetching targets…")
+  -- If we have history, show picker immediately with history while fetching
+  local history = targets.get_history()
+  if #history > 0 then
+    util.notify("Fetching targets… (history available)")
+  else
+    util.notify("Fetching targets…")
+  end
+
   targets.fetch(root, function(target_list, err)
-    if err then
-      util.notify("Query warning: " .. err, vim.log.levels.WARN)
-    end
-    if #target_list == 0 then
+    if err then util.notify("Query warning: " .. err, vim.log.levels.WARN) end
+
+    -- Merge history with fetched targets (history may contain targets not in //...)
+    local all = #target_list > 0 and target_list or history
+    if #all == 0 then
       util.notify("No targets found in workspace", vim.log.levels.ERROR)
       return
     end
 
-    -- Bubble last_target to the top of the list
-    local c = cfg()
-    local sorted = vim.deepcopy(target_list)
-    if c.last_target then
-      for i, t in ipairs(sorted) do
-        if t == c.last_target then
-          table.remove(sorted, i)
-          table.insert(sorted, 1, c.last_target)
-          break
-        end
-      end
-    end
-
     vim.schedule(function()
-      picker.select(sorted, {
-        prompt = prompt,
-        format = function(t)
-          return (c.last_target and t == c.last_target) and ("* " .. t) or t
-        end,
-      }, function(choice)
+      pick_with_history(all, prompt, function(choice)
         if choice then action(choice) end
       end)
     end)
@@ -179,6 +213,17 @@ local function cmd_query(opts)
 
   runner.run({ c.bazel_cmd, "query", expr }, {
     title     = "Bazel query: " .. expr,
+    workspace = root,
+  })
+end
+
+--- BazelQueryTests — shortcut for `bazel query 'tests(//...)'`
+local function cmd_query_tests()
+  local c = cfg()
+  local root = require_workspace()
+  if not root then return end
+  runner.run({ c.bazel_cmd, "query", "tests(//...)" }, {
+    title     = "Bazel query: tests",
     workspace = root,
   })
 end
@@ -296,6 +341,7 @@ local function cmd_pick(opts)
   pick_then(prompt, function(target)
     c.last_target = target
     targets.save_last_target(target)
+    targets.push_history(target)
     util.notify("Selected: " .. target)
     if subcmd == "build" then
       run_target("build", target, c.build_flags)
@@ -305,6 +351,177 @@ local function cmd_pick(opts)
       run_target("run",   target, c.run_flags)
     end
   end)
+end
+
+--- BazelSelectConfig — pick a build config from .bazelrc
+local function cmd_select_config()
+  local root = require_workspace()
+  if not root then return end
+
+  local configs = workspace.get_bazelrc_configs(root)
+  if #configs == 0 then
+    util.notify("No configs found in .bazelrc", vim.log.levels.WARN)
+    return
+  end
+
+  table.insert(configs, 1, "(none — clear config)")
+
+  picker.select(configs, { prompt = "BazelSelectConfig:" }, function(choice)
+    if not choice then return end
+    if choice == "(none — clear config)" then
+      state.set_config(nil)
+      util.notify("Build config cleared")
+    else
+      state.set_config(choice)
+      util.notify("Build config: " .. choice)
+    end
+  end)
+end
+
+--- BazelSelectPlatform — pick a platform via bazel query
+local function cmd_select_platform()
+  local c = cfg()
+  local root = require_workspace()
+  if not root then return end
+
+  local platform_history = targets.get_platform_history()
+
+  local lines = {}
+  vim.fn.jobstart({ c.bazel_cmd, "query", "kind(platform, //platforms/...)" }, {
+    cwd = root,
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if data then
+        for _, line in ipairs(data) do
+          local t = util.trim(line)
+          if t ~= "" then table.insert(lines, t) end
+        end
+      end
+    end,
+    on_exit = function(_, _)
+      vim.schedule(function()
+        local all = vim.deepcopy(lines)
+        -- Merge platform history (may have entries not in //platforms/...)
+        local seen = {}
+        for _, p in ipairs(all) do seen[p] = true end
+        for _, p in ipairs(platform_history) do
+          if not seen[p] then table.insert(all, p) end
+        end
+
+        if #all == 0 then
+          util.notify("No platforms found", vim.log.levels.WARN)
+          return
+        end
+
+        table.insert(all, 1, "(none — clear platform)")
+
+        local hist_set = {}
+        for _, p in ipairs(platform_history) do hist_set[p] = true end
+
+        picker.select(all, {
+          prompt = "BazelSelectPlatform:",
+          format = function(p)
+            return hist_set[p] and ("» " .. p) or p
+          end,
+        }, function(choice)
+          if not choice then return end
+          if choice == "(none — clear platform)" then
+            state.set_platform(nil)
+            util.notify("Platform cleared")
+          else
+            state.set_platform(choice)
+            targets.push_platform_history(choice)
+            util.notify("Platform: " .. choice)
+          end
+        end)
+      end)
+    end,
+  })
+end
+
+--- BazelStatus — show current state
+local function cmd_status()
+  local c = cfg()
+  local lines = {
+    "State:       " .. state.describe(),
+    "Last target: " .. (c.last_target or "(none)"),
+    "Bazel cmd:   " .. c.bazel_cmd,
+  }
+  local history = targets.get_history()
+  if #history > 0 then
+    table.insert(lines, "History:     " .. table.concat(history, ", "))
+  end
+  util.notify(table.concat(lines, "\n"))
+end
+
+--- BazelCompileCommands [platform] — run //compile_commands:refresh_<platform>
+local function cmd_compile_commands(opts)
+  local c = cfg()
+  local root = require_workspace()
+  if not root then return end
+
+  local arg = util.trim(opts.args or "")
+  if arg ~= "" then
+    runner.run({ c.bazel_cmd, "run", "//compile_commands:refresh_" .. arg }, {
+      title     = "Bazel compile_commands:" .. arg,
+      workspace = root,
+    })
+    return
+  end
+
+  -- Query available refresh targets
+  vim.fn.jobstart(
+    { c.bazel_cmd, "query", "//compile_commands/..." },
+    {
+      cwd = root,
+      stdout_buffered = true,
+      on_stdout = function(_, data)
+        -- handled in on_exit via closure
+        if data then
+          for _, line in ipairs(data) do
+            local t = util.trim(line)
+            if t ~= "" and t:find(":refresh_") then
+              -- stored below
+            end
+          end
+        end
+      end,
+      on_exit = function(_, _) end,
+    }
+  )
+
+  -- Simpler: just collect synchronously via a buffered job
+  local refresh_targets = {}
+  vim.fn.jobstart({ c.bazel_cmd, "query", "//compile_commands/..." }, {
+    cwd             = root,
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if data then
+        for _, line in ipairs(data) do
+          local t = util.trim(line)
+          if t ~= "" and t:find(":refresh") then
+            table.insert(refresh_targets, t)
+          end
+        end
+      end
+    end,
+    on_exit = function(_, _)
+      vim.schedule(function()
+        if #refresh_targets == 0 then
+          util.notify("No //compile_commands:refresh_* targets found", vim.log.levels.WARN)
+          return
+        end
+        picker.select(refresh_targets, { prompt = "BazelCompileCommands:" }, function(choice)
+          if choice then
+            runner.run({ c.bazel_cmd, "run", choice }, {
+              title     = "Bazel " .. choice,
+              workspace = root,
+            })
+          end
+        end)
+      end)
+    end,
+  })
 end
 
 local function cmd_output()
@@ -321,15 +538,20 @@ function M.register()
     })
   end
 
-  def("BazelBuild",       cmd_build,         "Build a Bazel target",                     true)
-  def("BazelTest",        cmd_test,           "Test a Bazel target",                      true)
-  def("BazelRun",         cmd_run,            "Run a Bazel target",                       true)
-  def("BazelClean",       cmd_clean,          "Clean the Bazel output tree",              true)
-  def("BazelQuery",       cmd_query,          "Run a bazel query expression",             true)
-  def("BazelInfo",        cmd_info,           "Show bazel info",                          true)
-  def("BazelJumpToBuild", cmd_jump_to_build,  "Jump to nearest BUILD file",               false)
-  def("BazelPick",        cmd_pick,           "Interactively pick a Bazel target",        true)
-  def("BazelOutput",      cmd_output,         "Open the Bazel output window",             false)
+  def("BazelBuild",           cmd_build,            "Build a Bazel target",                     true)
+  def("BazelTest",            cmd_test,             "Test a Bazel target",                      true)
+  def("BazelRun",             cmd_run,              "Run a Bazel target",                       true)
+  def("BazelClean",           cmd_clean,            "Clean the Bazel output tree",              true)
+  def("BazelQuery",           cmd_query,            "Run a bazel query expression",             true)
+  def("BazelQueryTests",      cmd_query_tests,      "Query all test targets",                   false)
+  def("BazelInfo",            cmd_info,             "Show bazel info",                          true)
+  def("BazelJumpToBuild",     cmd_jump_to_build,    "Jump to nearest BUILD file",               false)
+  def("BazelPick",            cmd_pick,             "Interactively pick a Bazel target",        true)
+  def("BazelSelectConfig",    cmd_select_config,    "Select build config from .bazelrc",        false)
+  def("BazelSelectPlatform",  cmd_select_platform,  "Select target platform",                   false)
+  def("BazelStatus",          cmd_status,           "Show current Bazel state",                 false)
+  def("BazelCompileCommands", cmd_compile_commands, "Run compile_commands refresh",             true)
+  def("BazelOutput",          cmd_output,           "Open the Bazel output window",             false)
 end
 
 return M

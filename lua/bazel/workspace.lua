@@ -65,4 +65,24 @@ function M.find_build_file(start_dir, root)
   return nil
 end
 
+--- Parse `build:xxx` config names from .bazelrc in the workspace root.
+---@param root string
+---@return string[]
+function M.get_bazelrc_configs(root)
+  local f = io.open(root .. "/.bazelrc", "r")
+  if not f then return {} end
+
+  local configs = {}
+  local seen = {}
+  for line in f:lines() do
+    local config = line:match("^build:(%S+)%s")
+    if config and not seen[config] then
+      seen[config] = true
+      table.insert(configs, config)
+    end
+  end
+  f:close()
+  return configs
+end
+
 return M
