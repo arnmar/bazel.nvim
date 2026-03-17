@@ -54,6 +54,7 @@ function M.fetch(root, callback)
   }
 
   local lines = {}
+  local stderr_lines = {}
 
   vim.fn.jobstart(cmd, {
     cwd = root,
@@ -68,14 +69,29 @@ function M.fetch(root, callback)
         end
       end
     end,
-    on_stderr = function(_, _data) end, -- ignore stderr (status messages)
+    on_stderr = function(_, data)
+      if not data then return end
+      for _, line in ipairs(data) do
+        if line ~= "" then table.insert(stderr_lines, line) end
+      end
+    end,
     on_exit = function(_, code)
       if #lines > 0 then
         table.sort(lines)
         set_cache(root, lines)
-        callback(lines, code ~= 0 and ("bazel query exited " .. code) or nil)
+        callback(lines, nil)
       else
-        callback({}, "bazel query returned no targets (exit " .. code .. ")")
+        local err = "bazel query returned no targets (exit " .. code .. ")"
+        if #stderr_lines > 0 then
+          -- Show first meaningful stderr line for diagnosis
+          for _, l in ipairs(stderr_lines) do
+            if l:find("ERROR") or l:find("error") then
+              err = err .. ": " .. l
+              break
+            end
+          end
+        end
+        callback({}, err)
       end
     end,
   })
