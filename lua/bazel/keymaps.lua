@@ -15,6 +15,7 @@ local bindings = {
   status           = { cmd = "BazelStatus",          desc = "Bazel: show current state" },
   compile_commands = { cmd = "BazelCompileCommands", desc = "Bazel: refresh compile_commands" },
   query_tests      = { cmd = "BazelQueryTests",      desc = "Bazel: query test targets" },
+  stop             = { cmd = "BazelStop",            desc = "Bazel: stop running job" },
 }
 
 ---@param maps table<string, string|false>

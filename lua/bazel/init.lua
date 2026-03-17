@@ -39,6 +39,7 @@ M.config = {
     status           = "<leader>bs",
     compile_commands = "<leader>bm",
     query_tests      = "<leader>bT",
+    stop             = "<leader>bx",
   },
 }
 

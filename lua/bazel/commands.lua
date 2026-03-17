@@ -524,6 +524,10 @@ local function cmd_compile_commands(opts)
   })
 end
 
+local function cmd_stop()
+  runner.stop()
+end
+
 local function cmd_output()
   runner.open_output()
 end
@@ -551,6 +555,7 @@ function M.register()
   def("BazelSelectPlatform",  cmd_select_platform,  "Select target platform",                   false)
   def("BazelStatus",          cmd_status,           "Show current Bazel state",                 false)
   def("BazelCompileCommands", cmd_compile_commands, "Run compile_commands refresh",             true)
+  def("BazelStop",            cmd_stop,             "Stop the running Bazel job",               false)
   def("BazelOutput",          cmd_output,           "Open the Bazel output window",             false)
 end
 

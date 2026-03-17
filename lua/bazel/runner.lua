@@ -8,6 +8,7 @@ local util = require("bazel.util")
 -- Single reusable output buffer / window, created lazily.
 local _output_buf = nil
 local _output_win = nil
+local _current_job = nil  -- job id of the running bazel process
 
 --- Get or create the scratch output buffer.
 ---@return number bufnr
@@ -188,6 +189,12 @@ function M.run(cmd_parts, opts)
 
   local cmd_str = util.build_cmd(cmd_parts)
 
+  -- Stop any currently running job before starting a new one
+  if _current_job and _current_job > 0 then
+    vim.fn.jobstop(_current_job)
+    _current_job = nil
+  end
+
   local job_id = vim.fn.jobstart(cmd_str, {
     cwd             = workspace,
     stdout_buffered = false,
@@ -218,6 +225,7 @@ function M.run(cmd_parts, opts)
     end,
 
     on_exit = function(_, exit_code)
+      _current_job = nil
       vim.schedule(function()
         local qf_items = parse_errors(all_lines, workspace)
 
@@ -252,7 +260,25 @@ function M.run(cmd_parts, opts)
 
   if job_id <= 0 then
     util.notify("Failed to start: " .. cmd_str, vim.log.levels.ERROR)
+  else
+    _current_job = job_id
   end
+end
+
+--- Stop the currently running bazel job, if any.
+function M.stop()
+  if _current_job and _current_job > 0 then
+    vim.fn.jobstop(_current_job)
+    _current_job = nil
+    util.notify("Build stopped", vim.log.levels.WARN)
+  else
+    util.notify("No build running", vim.log.levels.INFO)
+  end
+end
+
+--- Return true if a job is currently running.
+function M.is_running()
+  return _current_job ~= nil and _current_job > 0
 end
 
 --- Open the output window without starting a job (useful for reviewing last output).
