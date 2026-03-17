@@ -51,6 +51,9 @@ function M.fetch(root, callback)
     cfg.bazel_cmd or "bazel",
     "query",
     "//...",
+    "--keep_going",
+    "--noshow_progress",
+    "--ui_event_filters=-INFO",
   }
 
   local lines = {}
