@@ -353,26 +353,51 @@ local function cmd_pick(opts)
   end)
 end
 
---- BazelSelectConfig — pick a build config from .bazelrc
+--- BazelSelectConfig — pick a build config from .bazelrc (with history)
 local function cmd_select_config()
   local root = require_workspace()
   if not root then return end
 
-  local configs = workspace.get_bazelrc_configs(root)
-  if #configs == 0 then
-    util.notify("No configs found in .bazelrc", vim.log.levels.WARN)
-    return
+  local bazelrc_configs = workspace.get_bazelrc_configs(root)
+  local history = targets.get_config_history()
+
+  -- Merge: history first, then remaining bazelrc configs
+  local seen = {}
+  local all = {}
+  for _, c in ipairs(history) do
+    seen[c] = true
+    table.insert(all, c)
+  end
+  for _, c in ipairs(bazelrc_configs) do
+    if not seen[c] then
+      seen[c] = true
+      table.insert(all, c)
+    end
   end
 
-  table.insert(configs, 1, "(none — clear config)")
+  local hist_set = {}
+  for _, c in ipairs(history) do hist_set[c] = true end
 
-  picker.select(configs, { prompt = "BazelSelectConfig:" }, function(choice)
+  -- Prepend special entries
+  table.insert(all, 1, "(release — no config flags)")
+  table.insert(all, 2, "(none — clear config)")
+
+  picker.select(all, {
+    prompt = "BazelSelectConfig:",
+    format = function(c)
+      return hist_set[c] and ("» " .. c) or c
+    end,
+  }, function(choice)
     if not choice then return end
     if choice == "(none — clear config)" then
       state.set_config(nil)
-      util.notify("Build config cleared")
+      util.notify("Build config cleared (release/default)")
+    elseif choice == "(release — no config flags)" then
+      state.set_config(nil)
+      util.notify("Build config: release (no flags)")
     else
       state.set_config(choice)
+      targets.push_config_history(choice)
       util.notify("Build config: " .. choice)
     end
   end)
@@ -449,7 +474,11 @@ local function cmd_status()
   }
   local history = targets.get_history()
   if #history > 0 then
-    table.insert(lines, "History:     " .. table.concat(history, ", "))
+    table.insert(lines, "Targets:     " .. table.concat(history, ", "))
+  end
+  local cfg_hist = targets.get_config_history()
+  if #cfg_hist > 0 then
+    table.insert(lines, "Configs:     " .. table.concat(cfg_hist, ", "))
   end
   util.notify(table.concat(lines, "\n"))
 end

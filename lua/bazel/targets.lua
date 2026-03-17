@@ -9,14 +9,16 @@ local _cache = {}
 
 local _data_dir     = vim.fn.stdpath("data")
 local _persist_path = _data_dir .. "/bazel_nvim_last_target.txt"
-local _history_path = _data_dir .. "/bazel_nvim_history.txt"
+local _history_path      = _data_dir .. "/bazel_nvim_history.txt"
 local _plat_history_path = _data_dir .. "/bazel_nvim_platform_history.txt"
+local _cfg_history_path  = _data_dir .. "/bazel_nvim_config_history.txt"
 
 local HISTORY_MAX = 20
 
 -- In-memory history (most recent first)
-local _history      = nil  -- lazy loaded
+local _history      = nil
 local _plat_history = nil
+local _cfg_history  = nil
 
 --- Return cached targets for `root` if still valid, else nil.
 ---@param root string
@@ -151,6 +153,25 @@ end
 function M.get_history()
   if not _history then _history = load_list(_history_path) end
   return _history
+end
+
+--- Push a config to config history.
+---@param config string
+function M.push_config_history(config)
+  if not _cfg_history then _cfg_history = load_list(_cfg_history_path) end
+  for i, c in ipairs(_cfg_history) do
+    if c == config then table.remove(_cfg_history, i); break end
+  end
+  table.insert(_cfg_history, 1, config)
+  if #_cfg_history > HISTORY_MAX then _cfg_history[HISTORY_MAX + 1] = nil end
+  save_list(_cfg_history_path, _cfg_history)
+end
+
+--- Return the config history (most recent first).
+---@return string[]
+function M.get_config_history()
+  if not _cfg_history then _cfg_history = load_list(_cfg_history_path) end
+  return _cfg_history
 end
 
 --- Push a platform to platform history.
