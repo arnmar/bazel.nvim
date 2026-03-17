@@ -38,7 +38,7 @@ local function run_target(subcmd, target, extra_flags)
 
   c.last_target = target
   targets.save_last_target(target)
-  targets.push_history(target)
+  targets.push_history(target, state.get_config(), state.get_platform())
 
   -- State flags come first so .bazelrc can still be overridden by extra_flags
   local cmd_parts = { c.bazel_cmd, subcmd }
@@ -57,22 +57,34 @@ local function run_target(subcmd, target, extra_flags)
 end
 
 --- Open the picker over `items`, with history entries bubbled to the top.
+--- When a history entry is chosen, its config+platform are restored into state.
 ---@param items string[]
 ---@param prompt string
 ---@param callback fun(choice: string)
 local function pick_with_history(items, prompt, callback)
   local history = targets.get_history()
-  local seen = {}
-  local sorted = {}
 
-  -- History first (most recent first), deduplicated
-  for _, t in ipairs(history) do
-    if not seen[t] then
-      seen[t] = true
-      table.insert(sorted, t)
+  -- Build a lookup: target -> most recent history entry (for state restore)
+  -- A target may appear multiple times with different configs/platforms;
+  -- keep only the most recent one for the label.
+  local hist_entry = {}  -- target -> { config, platform }
+  local hist_order = {}  -- ordered unique targets from history
+  local hist_seen  = {}
+  for _, e in ipairs(history) do
+    if not hist_seen[e.target] then
+      hist_seen[e.target] = true
+      hist_entry[e.target] = e
+      table.insert(hist_order, e.target)
     end
   end
-  -- Then remaining items
+
+  -- Merge: history targets first, then remaining items
+  local seen   = {}
+  local sorted = {}
+  for _, t in ipairs(hist_order) do
+    seen[t] = true
+    table.insert(sorted, t)
+  end
   for _, t in ipairs(items) do
     if not seen[t] then
       seen[t] = true
@@ -80,15 +92,35 @@ local function pick_with_history(items, prompt, callback)
     end
   end
 
-  local history_set = {}
-  for _, t in ipairs(history) do history_set[t] = true end
-
   picker.select(sorted, {
     prompt = prompt,
     format = function(t)
-      return history_set[t] and ("» " .. t) or t
+      local e = hist_entry[t]
+      if not e then return t end
+      local parts = { "» " .. t }
+      if e.config   then table.insert(parts, "[" .. e.config .. "]") end
+      if e.platform then
+        -- shorten platform label: just the part after the last ":"
+        local short = e.platform:match(":([^:]+)$") or e.platform
+        table.insert(parts, "[" .. short .. "]")
+      end
+      return table.concat(parts, "  ")
     end,
-  }, callback)
+  }, function(choice)
+    if not choice then return end
+    -- Restore config+platform from history entry if this was a history pick
+    local e = hist_entry[choice]
+    if e then
+      state.set_config(e.config)
+      state.set_platform(e.platform)
+      if e.config or e.platform then
+        util.notify(
+          "Restored: " .. state.describe()
+        )
+      end
+    end
+    callback(choice)
+  end)
 end
 
 --- Fetch targets and open picker, then call `action(target)`.
@@ -341,7 +373,6 @@ local function cmd_pick(opts)
   pick_then(prompt, function(target)
     c.last_target = target
     targets.save_last_target(target)
-    targets.push_history(target)
     util.notify("Selected: " .. target)
     if subcmd == "build" then
       run_target("build", target, c.build_flags)

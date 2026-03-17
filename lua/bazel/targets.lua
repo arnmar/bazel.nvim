@@ -110,7 +110,45 @@ function M.fetch(root, callback)
   })
 end
 
---- Load a history list from a file (one entry per line).
+--- Load build history from file.
+--- File format: one entry per line, tab-separated: target\tconfig\tplatform
+---@return table[]  list of { target, config, platform } (config/platform may be nil)
+local function load_history(path)
+  local f = io.open(path, "r")
+  if not f then return {} end
+  local items = {}
+  for line in f:lines() do
+    local t = util.trim(line)
+    if t ~= "" then
+      local parts = vim.split(t, "\t", { plain = true })
+      table.insert(items, {
+        target   = parts[1] or "",
+        config   = (parts[2] and parts[2] ~= "") and parts[2] or nil,
+        platform = (parts[3] and parts[3] ~= "") and parts[3] or nil,
+      })
+    end
+  end
+  f:close()
+  return items
+end
+
+--- Save build history to file.
+---@param path string
+---@param items table[]
+local function save_history(path, items)
+  local f = io.open(path, "w")
+  if not f then return end
+  for _, entry in ipairs(items) do
+    f:write(table.concat({
+      entry.target,
+      entry.config   or "",
+      entry.platform or "",
+    }, "\t") .. "\n")
+  end
+  f:close()
+end
+
+--- Load a simple string list from a file (one entry per line).
 ---@param path string
 ---@return string[]
 local function load_list(path)
@@ -125,7 +163,7 @@ local function load_list(path)
   return items
 end
 
---- Save a list to a file (one entry per line).
+--- Save a simple string list to a file.
 ---@param path string
 ---@param items string[]
 local function save_list(path, items)
@@ -135,23 +173,29 @@ local function save_list(path, items)
   f:close()
 end
 
---- Push a target to the front of history (deduplicates, caps at HISTORY_MAX).
+--- Push a build entry to history. Deduplicates by target+config+platform.
 ---@param target string
-function M.push_history(target)
-  if not _history then _history = load_list(_history_path) end
-  -- Remove existing occurrence
-  for i, t in ipairs(_history) do
-    if t == target then table.remove(_history, i); break end
+---@param config string|nil
+---@param platform string|nil
+function M.push_history(target, config, platform)
+  if not _history then _history = load_history(_history_path) end
+  -- Remove existing entry with same target+config+platform
+  for i, e in ipairs(_history) do
+    if e.target == target and e.config == config and e.platform == platform then
+      table.remove(_history, i)
+      break
+    end
   end
-  table.insert(_history, 1, target)
+  table.insert(_history, 1, { target = target, config = config, platform = platform })
   if #_history > HISTORY_MAX then _history[HISTORY_MAX + 1] = nil end
-  save_list(_history_path, _history)
+  save_history(_history_path, _history)
 end
 
---- Return the in-memory target history (most recent first).
----@return string[]
+--- Return build history (most recent first).
+--- Each entry: { target: string, config: string|nil, platform: string|nil }
+---@return table[]
 function M.get_history()
-  if not _history then _history = load_list(_history_path) end
+  if not _history then _history = load_history(_history_path) end
   return _history
 end
 
